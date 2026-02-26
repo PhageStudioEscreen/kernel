@@ -37,6 +37,7 @@
 #include <linux/kernel.h>
 #include <linux/hid.h>
 #include <linux/mutex.h>
+#include <linux/kfifo.h>
 #include <asm/unaligned.h>
 
 #include "../hid-ids.h"
@@ -80,13 +81,13 @@
 #define UART_HID_TIMEOUT_AUTO 0x00000000
 
 /* debug option */
-static bool debug;
+static bool debug = false;
 module_param(debug, bool, 0444);
 MODULE_PARM_DESC(debug, "print a lot of debug information");
 
 #define uart_hid_dbg(uhid, fmt, arg...)                       \
     do {                                                      \
-        if (true)                                             \
+        if (debug)                                            \
             dev_printk(KERN_DEBUG, &(uhid)->serdev->dev, fmt, \
                        ##arg);                                \
     } while (0)
@@ -128,6 +129,8 @@ struct uart_hid {
     u8 *recvbuf;  /* receive buffer */
     u16 recvsize; /* actual receive size */
     u16 wantsize; /* want receive size */
+
+    struct kfifo fifo; /* FIFO for serdev input */
 
     unsigned long flags;    /* device flags */
     unsigned long quirks;   /* Various quirks */
@@ -618,20 +621,45 @@ out_unlock:
 static int uart_hid_recv(struct serdev_device *serdev, const u8 *data,
                          size_t count)
 {
-    struct uart_hid *uhid = serdev_device_get_drvdata(serdev);
-    u32              used = 0;
+    struct uart_hid *uhid   = serdev_device_get_drvdata(serdev);
+    u32              used   = 0;
+    u32              ocount = count;
+    u32              ret;
+    u32              fifo_used;
+    u32              fifo_peek;
+    u32              fifo_remain;
     u32              dMagic;
     u16              wLength;
 
 next_report:
 
+    fifo_used = kfifo_len(&uhid->fifo);
+
     /* dMagic + wLength */
-    if (count < sizeof(__le32) + sizeof(__le16)) {
-        return used;
+    if ((fifo_used + count) < sizeof(__le32) + sizeof(__le16)) {
+        if (fifo_used + count) {
+            if (count) {
+                ret = kfifo_in(&uhid->fifo, data, count);
+                if (ret != count) {
+                    dev_err(&uhid->serdev->dev,
+                            "%s: kfifo overflow, drop %d byte\n", __func__, count - ret);
+                }
+                fifo_used = kfifo_len(&uhid->fifo);
+            }
+            uart_hid_dbg(uhid, "%s: head fifo data %d, remain data %d\n", __func__, fifo_used, count);
+            uart_hid_dbg(uhid, "%s: head used data %d, origin data %d\n", __func__, used, ocount);
+            ret = kfifo_out_peek(&uhid->fifo, uhid->irepbuf, fifo_used);
+            uart_hid_dbg(uhid, "%s: head fifo %*ph\n", __func__, (int)fifo_used, uhid->irepbuf);
+            uart_hid_dbg(uhid, "%s: head data %*ph\n", __func__, (int)count, data);
+        }
+        return used + count;
     }
 
+    fifo_peek = fifo_used < (sizeof(__le32) + sizeof(__le16)) ? fifo_used : (sizeof(__le32) + sizeof(__le16));
+
     /* copy for properly aligned */
-    memcpy(uhid->irepbuf, data, sizeof(__le32) + sizeof(__le16));
+    ret = kfifo_out_peek(&uhid->fifo, uhid->irepbuf, fifo_peek);
+    memcpy(uhid->irepbuf + fifo_peek, data, sizeof(__le32) + sizeof(__le16) - fifo_peek);
 
     dMagic  = le32_to_cpup((__le32 *)uhid->irepbuf);
     wLength = le16_to_cpup((__le16 *)(uhid->irepbuf + sizeof(__le32)));
@@ -646,16 +674,24 @@ next_report:
                 wantsize = sizeof(__le32) + sizeof(__le16);
             }
 
-            if (wantsize > count) {
-                uart_hid_dbg(uhid, "%s: read (%d/%d) continue\n", __func__, count, wantsize);
+            if (wantsize > count + fifo_used) {
+                uart_hid_dbg(uhid, "%s: read (%d/%d) continue\n", __func__, count + fifo_used, wantsize);
                 return used;
             }
 
-            uart_hid_dbg(uhid, "%s: read (%d/%d) done\n", __func__, count, wantsize);
-
             uhid->recvsize = wantsize;
-            memcpy(uhid->recvbuf, data, wantsize);
 
+            fifo_remain = fifo_used > wantsize ? wantsize : fifo_used;
+
+            wantsize -= fifo_remain;
+
+            /* read from fifo */
+            ret = kfifo_out(&uhid->fifo, uhid->recvbuf, fifo_remain);
+
+            /* read from data */
+            memcpy(uhid->recvbuf + fifo_remain, data, wantsize);
+
+            uart_hid_dbg(uhid, "%s: read (%d/%d) done\n", __func__, count + fifo_used, uhid->recvsize);
             uart_hid_dbg(uhid, "%s: read %*ph\n", __func__, uhid->recvsize, uhid->recvbuf);
 
             clear_bit(UART_HID_RX_PENDING, &uhid->flags);
@@ -666,12 +702,22 @@ next_report:
             data += wantsize;
             count -= wantsize;
             goto next_report;
+        } else {
+            uart_hid_dbg(uhid, "%s: unexpected input data report, drop\n", __func__);
         }
     } else if (dMagic == UART_HID_MAGIC_INREP) {
         u16 insize = sizeof(__le32) + wLength;
 
         if (wLength == 0x0000) {
+            insize = sizeof(__le32) + sizeof(__le16);
+
             dev_warn(&uhid->serdev->dev, "%s: zero input report\n", __func__);
+
+            /* drop */
+            ret = kfifo_out(&uhid->fifo, uhid->irepbuf, fifo_peek);
+
+            insize -= fifo_peek;
+
             used += insize;
             data += insize;
             count -= insize;
@@ -692,18 +738,26 @@ next_report:
             goto drop;
         }
 
-        if (insize > count) {
+        if (insize > count + fifo_used) {
             dev_warn(&uhid->serdev->dev,
                      "%s: input (%d/%d) continue\n", __func__,
-                     count, insize);
+                     count + fifo_used, insize);
             return used;
         }
 
-        uart_hid_dbg(uhid, "%s: input (%d/%d) done\n", __func__, count, insize);
+        fifo_remain = fifo_used > insize ? insize : fifo_used;
 
-        memcpy(uhid->irepbuf, data, insize);
+        insize -= fifo_remain;
+
+        /* read from fifo */
+        ret = kfifo_out(&uhid->fifo, uhid->irepbuf, fifo_remain);
+
+        /* read from data */
+        memcpy(uhid->irepbuf + fifo_remain, data, insize);
 
         if (test_bit(UART_HID_WORKING, &uhid->flags)) {
+            uart_hid_dbg(uhid, "%s: input (%d/%d) done\n", __func__, count + fifo_used, insize);
+
             if (uhid->hid->group != HID_GROUP_RMI)
                 pm_wakeup_event(&uhid->serdev->dev, 0);
 
@@ -711,7 +765,7 @@ next_report:
                              uhid->irepbuf + sizeof(__le32) + sizeof(__le16),
                              wLength - sizeof(__le16), 1);
         } else {
-            uart_hid_dbg(uhid, "%s: input (%d/%d) drop", __func__, count, insize);
+            uart_hid_dbg(uhid, "%s: input (%d/%d) drop\n", __func__, count + fifo_used, insize);
         }
 
         uart_hid_dbg(uhid, "%s: input %*ph\n", __func__, insize, uhid->irepbuf);
@@ -720,13 +774,22 @@ next_report:
         data += insize;
         count -= insize;
         goto next_report;
+    } else {
+        uart_hid_dbg(uhid, "%s: invalid dMagic %08x wLength %d\n", __func__, dMagic, wLength);
     }
 
 drop:
     /* drop just 1 byte to find the next packet */
-    used++;
-    data++;
-    count--;
+    if (fifo_used) {
+        u32 dummy;
+        ret = kfifo_get(&uhid->fifo, &dummy);
+        uart_hid_dbg(uhid, "%s: drop byte from fifo\n", __func__);
+    } else {
+        uart_hid_dbg(uhid, "%s: drop byte from data\n", __func__);
+        used++;
+        data++;
+        count--;
+    }
 
     goto next_report;
 }
@@ -1151,14 +1214,20 @@ int uart_hid_core_probe(struct serdev_device *serdev, struct uarthid_ops *ops,
 
     serdev_device_set_flow_control(serdev, false);
 
+    ret = kfifo_alloc(&uhid->fifo, 512, GFP_KERNEL);
+    if (ret) {
+        dev_err(&serdev->dev, "can't allocate fifo: %d\n", ret);
+        goto err_serdev;
+    }
+
     ret = uart_hid_fetch_hid_descriptor(uhid);
     if (ret)
-        goto err_serdev;
+        goto err_fifo_free;
 
     hid = hid_allocate_device();
     if (IS_ERR(hid)) {
         ret = PTR_ERR(hid);
-        goto err_serdev;
+        goto err_fifo_free;
     }
 
     uhid->hid = hid;
@@ -1191,6 +1260,9 @@ int uart_hid_core_probe(struct serdev_device *serdev, struct uarthid_ops *ops,
 err_mem_free:
     hid_destroy_device(hid);
 
+err_fifo_free:
+    kfifo_free(&uhid->fifo);
+
 err_serdev:
     serdev_device_close(serdev);
 
@@ -1207,7 +1279,10 @@ void uart_hid_core_remove(struct serdev_device *serdev)
     struct hid_device *hid  = uhid->hid;
 
     hid_destroy_device(hid);
+
     serdev_device_close(serdev);
+
+    kfifo_free(&uhid->fifo);
 
     uart_hid_free_buffers(uhid);
 
