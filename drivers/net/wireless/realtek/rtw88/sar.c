@@ -2,6 +2,8 @@
 /* Copyright(c) 2018-2021  Realtek Corporation
  */
 
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 #include "sar.h"
 #include "phy.h"
 #include "debug.h"
@@ -97,7 +99,7 @@ int rtw_set_sar_specs(struct rtw_dev *rtwdev,
 			power, BIT(RTW_COMMON_SAR_FCT));
 
 		for (j = 0; j < RTW_RF_PATH_MAX; j++) {
-			for (k = 0; k < RTW_RATE_SECTION_MAX; k++) {
+			for (k = 0; k < RTW_RATE_SECTION_NUM; k++) {
 				arg = (struct rtw_sar_arg){
 					.sar_band = idx,
 					.path = j,
@@ -112,3 +114,5 @@ int rtw_set_sar_specs(struct rtw_dev *rtwdev,
 
 	return rtw_apply_sar(rtwdev, &new);
 }
+#endif
+
