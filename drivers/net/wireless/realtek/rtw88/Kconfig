@@ -26,11 +26,12 @@ config RTW88_SDIO
 config RTW88_8703B
     tristate
 
-config RTW88_8723D
-    tristate
-
 config RTW88_8723X
     tristate
+
+config RTW88_8723D
+    tristate
+    select RTW88_8723X
 
 config RTW88_8812A
     tristate
@@ -203,11 +204,6 @@ config RTW88_8822CU
     select RTW88_CORE
     select RTW88_USB
     select RTW88_8822C
-
-config RTW88_8723X_GENERIC
-    tristate "Realtek 8723X generic support"
-    select RTW88_CORE
-    select RTW88_8723X
 
 config RTW88_DEBUG
     bool "Realtek rtw88 new debug support"

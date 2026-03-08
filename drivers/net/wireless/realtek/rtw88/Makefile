@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 
-# ccflags-y += -O2 -std=gnu11 -Wno-declaration-after-statement
-# ccflags-y += -DCONFIG_RTW88_LEDS=1
-# ccflags-y += -DCONFIG_RTW88_DEBUG=1
-# ccflags-y += -DCONFIG_RTW88_DEBUGFS=1
-# ccflags-y += -D__CHECK_ENDIAN__
+ccflags-y += -O2 -std=gnu11 -Wno-declaration-after-statement
+ccflags-y += -DCONFIG_RTW88_LEDS=1
+ccflags-y += -DCONFIG_RTW88_DEBUG=1
+ccflags-y += -DCONFIG_RTW88_DEBUGFS=1
+ccflags-y += -D__CHECK_ENDIAN__
 
 obj-$(CONFIG_RTW88_CORE)	+= rtw_core.o
 rtw_core-y	+= main.o \

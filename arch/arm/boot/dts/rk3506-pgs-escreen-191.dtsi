@@ -97,6 +97,16 @@
 			gpios = <&gpio0 RK_PD0 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
 		};
+		bt_en: bt-en {
+			label = "bt_en";
+			gpios = <&gpio2 RK_PA4 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "none";
+		};
+		wifi_en: wifi-en {
+			label = "wifi_en";
+			gpios = <&gpio2 RK_PA5 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "none";
+		};
 	};
 
 	vcc_sys: vcc-sys {
@@ -423,6 +433,18 @@
 		dsi_panel_reset: dsi-panel-reset {
 			rockchip,pins =
 			 	<2 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	wifi-bt-enable {
+		bt_en_pin: bt-en-pin {
+			rockchip,pins =
+				<2 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		wifi_en_pin: wifi-en-pin {
+			rockchip,pins =
+				<2 RK_PA5 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
